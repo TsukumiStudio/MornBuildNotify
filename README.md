@@ -1,5 +1,7 @@
 # MornBuildNotify
 
+**使い方: https://tsukumistudio.github.io/MornBuildNotify/**
+
 GitHub Actions の進捗と結果を、**1つの Discord メッセージを書き換えながら**通知する Action。
 
 - 開始時にメッセージを1つ送り、各 step から `morn-build-notify update "文言"` で進捗へ書き換える
