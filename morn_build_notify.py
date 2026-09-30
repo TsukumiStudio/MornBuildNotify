@@ -21,6 +21,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
@@ -29,7 +30,9 @@ USER_AGENT = "MornBuildNotify/1.0"
 COLORS = {"success": 5763719, "failure": 15548997, "cancelled": 9807270, "skipped": 9807270}
 RUNNING_COLOR = 16705372
 BAR = 12
-TICK_SECONDS = 5
+# Discord の Webhook は1分に30回まで。進捗は6秒ごと（最大10回/分）に抑え、
+# 同じ Webhook を使う他のビルドや start / finish の分を残す。
+TICK_SECONDS = 6
 TICK_LIMIT = 3 * 60 * 60
 TITLES = {"success": "✅ ビルド成功", "failure": "❌ ビルド失敗",
           "cancelled": "⏹️ ビルド中止", "skipped": "⏭️ ビルドスキップ"}
@@ -78,8 +81,16 @@ def request(method, payload, *, wait=False, message_id=None):
     body = json.dumps(payload, ensure_ascii=False).encode()
     req = Request(urlunsplit((parts.scheme, parts.netloc, path, query, "")), data=body, method=method,
                   headers={"Content-Type": "application/json", "User-Agent": USER_AGENT})
-    with urlopen(req, timeout=10) as response:
-        return json.loads(response.read()) if response.status != 204 else {}
+    for attempt in range(2):
+        try:
+            with urlopen(req, timeout=10) as response:
+                return json.loads(response.read()) if response.status != 204 else {}
+        except HTTPError as error:
+            # 回数制限に当たったら、Discord が示す時間だけ待って一度だけやり直す。
+            if error.code != 429 or attempt:
+                raise
+            retry = json.loads(error.read() or b"{}").get("retry_after", 2)
+            time.sleep(min(float(retry), 30.0))
 
 
 def message_id():
@@ -460,7 +471,7 @@ def own_job(run_jobs):
 def tick(config):
     """自分の job が終わるまで、数秒ごとにプログレスバーを進める。"""
     found, (commit, _) = estimates(), commit_info()
-    mine = None
+    mine, sent = None, None
     deadline = time.monotonic() + TICK_LIMIT
     while time.monotonic() < deadline:
         run_jobs = jobs()
@@ -468,8 +479,10 @@ def tick(config):
         job = next((j for j in run_jobs if j.get("id") == mine), None)
         if mine and (not job or job.get("status") == "completed"):
             return
-        request("PATCH", progress_payload(config, run_jobs, found, read_phase(), commit),
-                message_id=message_id())
+        payload = progress_payload(config, run_jobs, found, read_phase(), commit)
+        if payload != sent:
+            request("PATCH", payload, message_id=message_id())
+            sent = payload
         time.sleep(TICK_SECONDS)
 
 
@@ -483,11 +496,9 @@ def main(args):
             phase_path().write_text("ビルド開始", encoding="utf-8")
             send_progress(config, estimates(), commit_info()[0], post_new=True)
         elif command == "update" and len(args) >= 2:
-            if not message_id():
-                warn("進捗通知のメッセージIDがありません")
-                return
+            # 送るのは setup が裏で動かす tick。ここで送ると回数制限に近づき、
+            # 各 step には GitHub API のトークンも無い。
             phase_path().write_text(" ".join(args[1:]), encoding="utf-8")
-            send_progress(config, estimates(), commit_info()[0])
         elif command == "tick" and len(args) == 1:
             if message_id():
                 tick(config)

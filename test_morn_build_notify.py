@@ -69,14 +69,13 @@ class NotifyTest(unittest.TestCase):
         os.environ["MORN_BUILD_NOTIFY_MESSAGE_ID"] = Path(os.environ["GITHUB_OUTPUT"]).read_text().strip().split("=")[1]
         with patch.object(notify, "build_payload", return_value={"embeds": [{"title": "完了"}]}):
             calls += self.send_all(["update", "Web", "書き出し中"], ["finish"])
-        self.assertEqual([c.method for c in calls], ["POST", "PATCH", "PATCH"])
+        # update only hands its phase to tick, so only start and finish reach Discord here.
+        self.assertEqual([c.method for c in calls], ["POST", "PATCH"])
         self.assertIn("wait=true", calls[0].full_url)
-        self.assertTrue(all("/messages/123456789012345678" in c.full_url for c in calls[1:]))
+        self.assertIn("/messages/123456789012345678", calls[1].full_url)
         self.assertIn("Game ビルド進捗", json.loads(calls[0].data)["content"])
-        update = json.loads(calls[1].data)
-        self.assertIn("Web 書き出し中", update["content"])
-        self.assertEqual((update["embeds"], update["allowed_mentions"]), ([], {"parse": []}))
-        self.assertEqual(json.loads(calls[2].data),
+        self.assertEqual(notify.read_phase(), "Web 書き出し中")
+        self.assertEqual(json.loads(calls[1].data),
                          {"embeds": [{"title": "完了"}], "content": "", "allowed_mentions": {"parse": []}})
 
     def progress_jobs(self):
@@ -111,29 +110,33 @@ class NotifyTest(unittest.TestCase):
         self.assertNotEqual(first.split()[0], later.split()[0])
         self.assertEqual(first.count("▰"), 1)
 
-    def test_update_sends_progress_embed_and_keeps_phase(self):
+    def test_update_only_hands_the_phase_to_tick(self):
         os.environ["MORN_BUILD_NOTIFY_MESSAGE_ID"] = "123456789012345678"
         os.environ["RUNNER_TEMP"] = self.temp.name
-        with patch.object(notify, "jobs", return_value=self.progress_jobs()), \
-                patch.object(notify, "estimates", return_value={}), \
-                patch.object(notify, "commit_info", return_value=("件名", "someone")):
-            calls = self.send_all(["update", "Web", "書き出し中"])
-        body = json.loads(calls[0].data)
-        self.assertEqual((calls[0].method, body["content"]), ("PATCH", ""))
-        self.assertEqual(body["embeds"][0]["description"], "Web 書き出し中")
+        calls = self.send_all(["update", "Web", "書き出し中"])
+        self.assertEqual(calls, [], "update must not spend the webhook rate limit")
         self.assertEqual(notify.read_phase(), "Web 書き出し中")
+
+    def test_rate_limit_waits_and_retries_once(self):
+        from urllib.error import HTTPError
+        limited = HTTPError(WEBHOOK, 429, "Too Many Requests", {}, io.BytesIO(b'{"retry_after": 1.5}'))
+        with patch.object(notify, "urlopen", side_effect=[limited, Response(b"{}")]) as send, \
+                patch.object(notify.time, "sleep") as sleep:
+            notify.request("PATCH", {}, message_id="123456789012345678")
+        self.assertEqual(send.call_count, 2)
+        sleep.assert_called_once_with(1.5)
 
     def test_tick_stops_when_own_job_completes(self):
         os.environ.update(MORN_BUILD_NOTIFY_MESSAGE_ID="123456789012345678", RUNNER_NAME="mac",
                           RUNNER_TEMP=self.temp.name)
         running, finished = self.progress_jobs(), self.progress_jobs()
         finished[0]["status"] = "completed"
-        with patch.object(notify, "jobs", side_effect=[running, finished]), \
+        with patch.object(notify, "jobs", side_effect=[running, running, finished]), \
                 patch.object(notify, "estimates", return_value={}), \
                 patch.object(notify, "commit_info", return_value=("件名", "someone")), \
                 patch.object(notify.time, "sleep"):
             calls = self.send_all(["tick"])
-        self.assertEqual([c.method for c in calls], ["PATCH"])
+        self.assertEqual([c.method for c in calls], ["PATCH"], "An unchanged progress is not sent again")
 
     def test_finish_without_message_posts_new_one(self):
         with patch.object(notify, "build_payload", return_value={"embeds": []}):
