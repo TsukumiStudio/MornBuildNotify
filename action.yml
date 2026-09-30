@@ -56,6 +56,8 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
       run: |
         set -euo pipefail
+        # webhook が空でも、後続 step の `morn-build-notify update` が失敗しないよう PATH だけは通す。
+        [ "$MODE" = setup ] && echo "$GITHUB_ACTION_PATH/bin" >> "$GITHUB_PATH"
         if [ -z "$WEBHOOK" ]; then
           echo "::warning::MornBuildNotify: webhook が空のため通知しません"
           exit 0
@@ -65,7 +67,6 @@ runs:
         export MORN_BUILD_NOTIFY_SHA="$SHA" MORN_BUILD_NOTIFY_CONFIG="$CONFIG"
         case "$MODE" in
           setup)
-            echo "$GITHUB_ACTION_PATH/bin" >> "$GITHUB_PATH"
             {
               echo "MORN_BUILD_NOTIFY_WEBHOOK=$WEBHOOK"
               echo "MORN_BUILD_NOTIFY_MESSAGE_ID=$MESSAGE_ID"
