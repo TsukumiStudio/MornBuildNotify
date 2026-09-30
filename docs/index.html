@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MornBuildNotify</title>
+<meta name="description" content="GitHub Actions の進捗と結果を、1つの Discord メッセージへ書き換えながら通知する Action">
+<style>
+  :root {
+    --bg: #fbfbfd; --fg: #1d1d24; --muted: #62626e; --line: #e3e3ea;
+    --card: #ffffff; --code: #f2f2f6; --accent: #5865f2; --ok: #2f9e5b; --ng: #d83c3e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161b; --fg: #e8e8ee; --muted: #a0a0ad; --line: #2c2c35;
+      --card: #1e1e25; --code: #25252e; --accent: #8c95ff; --ok: #5cc98a; --ng: #ff7375;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.75 system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 48px 16px 80px; }
+  h1 { font-size: 2rem; margin: 0 0 4px; letter-spacing: .01em; }
+  .lead { color: var(--muted); margin: 0 0 32px; }
+  h2 { font-size: 1.2rem; margin: 48px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+  a { color: var(--accent); }
+  code { background: var(--code); padding: 1px 5px; border-radius: 4px; font-size: .9em; }
+  pre { background: var(--code); padding: 14px 16px; border-radius: 8px; overflow-x: auto; font-size: .85rem; line-height: 1.6; }
+  pre code { background: none; padding: 0; }
+  ul { padding-left: 1.2em; }
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+  .table-wrap { overflow-x: auto; }
+  .flow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0; }
+  .step { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .step b { display: block; font-size: .8rem; color: var(--accent); letter-spacing: .06em; }
+  .step p { margin: 4px 0 0; font-size: .92rem; }
+  .msg { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--ng); border-radius: 8px; padding: 12px 16px; font-size: .9rem; }
+  .msg .t { font-weight: 700; }
+  .msg .f { color: var(--muted); font-size: .8rem; margin-top: 8px; }
+  @media (max-width: 560px) { .flow { grid-template-columns: 1fr; } h1 { font-size: 1.6rem; } }
+  footer { margin-top: 56px; color: var(--muted); font-size: .85rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>MornBuildNotify</h1>
+  <p class="lead">GitHub Actions の進捗と結果を、<strong>1つの Discord メッセージを書き換えながら</strong>通知する Action。</p>
+
+  <h2>できること</h2>
+  <div class="flow">
+    <div class="step"><b>START</b><p>ビルド開始でメッセージを1つ送る</p></div>
+    <div class="step"><b>UPDATE</b><p>各 step から <code>morn-build-notify update</code> で進捗へ書き換え</p></div>
+    <div class="step"><b>FINISH</b><p>結果・工程・ログ・リンクへ置き換え</p></div>
+  </div>
+  <ul>
+    <li>チャンネルに流れるのは1ビルド1メッセージ。途中経過で埋まらない</li>
+    <li>結果は成功・失敗・中止・スキップ。工程ごとの ✅ / ❌ / ⏭️ を段に分けて並べられる</li>
+    <li>失敗時は、失敗した job のログから <code>::error</code> の内容（無ければエラーらしい行）を抜き出して載せる</li>
+    <li>失敗時はコミット作者を Discord でメンションする（GitHub ログイン名 → Discord ID の表）</li>
+    <li>配布リンクなどの欄を自由に足せる。値が空なら出ない</li>
+    <li>通知に失敗してもビルドは止めない。Webhook URL はログに出さない</li>
+    <li>依存は <code>python3</code> と <code>gh</code> だけ（GitHub-hosted runner には入っている）</li>
+  </ul>
+  <div class="msg">
+    <div class="t">❌ 公開失敗: owner/repo</div>
+    <div>@作者 ビルドが失敗しました。確認をお願いします。</div>
+    <div class="f">コミット ／ 工程結果（✅ Checkout ❌ テスト ⏭️ 公開） ／ ログ ／ ビルドエラー詳細</div>
+  </div>
+
+  <h2>導入（ウィザード）</h2>
+  <p>対象リポジトリのルートで1行実行する。質問に答えると、設定ファイルと workflow を書き出し、Webhook を Secret へ登録する。</p>
+  <pre><code>python3 &lt;(curl -fsSL https://raw.githubusercontent.com/TsukumiStudio/MornBuildNotify/v1/init.py)</code></pre>
+  <p>既存ファイルは上書きするか毎回聞く。書き出したものをコミットして push すれば通知が届く。</p>
+
+  <h2>既存の workflow へ足す</h2>
+  <pre><code>permissions:
+  contents: read
+  actions: read            # 工程結果と失敗ログの取得に使う
+
+jobs:
+  notify-start:
+    runs-on: ubuntu-latest
+    outputs:
+      message-id: ${{ steps.notify.outputs.message-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: notify
+        uses: TsukumiStudio/MornBuildNotify@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          mode: start
+
+  build:
+    needs: notify-start
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: TsukumiStudio/MornBuildNotify@v1     # setup
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          message-id: ${{ needs.notify-start.outputs.message-id }}
+      - run: |
+          morn-build-notify update "テスト中"
+          ./test.sh
+
+  notify:
+    needs: [notify-start, build]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: TsukumiStudio/MornBuildNotify@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          mode: finish
+          message-id: ${{ needs.notify-start.outputs.message-id }}
+          needs: ${{ toJSON(needs) }}</code></pre>
+
+  <h2>入力</h2>
+  <div class="table-wrap"><table>
+    <tr><th>webhook</th><td>Discord Webhook URL。空なら何もしない</td></tr>
+    <tr><th>mode</th><td><code>setup</code>（既定）／ <code>start</code> ／ <code>finish</code></td></tr>
+    <tr><th>message-id</th><td>start の出力。渡すと同じメッセージを更新する</td></tr>
+    <tr><th>status</th><td>finish の結果。空なら <code>needs</code> から決める（中止 &gt; 失敗 &gt; 全成功 &gt; スキップ）</td></tr>
+    <tr><th>needs</th><td><code>${{ toJSON(needs) }}</code></td></tr>
+    <tr><th>fields</th><td>足す欄。1行1項目の <code>名前: 値</code>。<code>\n</code> で改行、値が空の行は出ない</td></tr>
+    <tr><th>sha</th><td>通知に載せるコミット（既定 <code>github.sha</code>）</td></tr>
+    <tr><th>config</th><td>設定ファイル（既定 <code>.github/morn-build-notify.json</code>）</td></tr>
+  </table></div>
+
+  <h2>条件付きの欄</h2>
+  <p>式で値を空にすると、その欄は出ない。成果物があるときだけリンクを載せられる。</p>
+  <pre><code>fields: |
+  遊ぶ: ${{ needs.build.outputs.url &amp;&amp; format('[このビルドを遊ぶ]({0})', needs.build.outputs.url) || '' }}</code></pre>
+
+  <h2>設定ファイル</h2>
+  <p><code>.github/morn-build-notify.json</code>。すべて省略できる。</p>
+  <pre><code>{
+  "name": "MyGame",
+  "username": "ビルド通知bot",
+  "titles": {"success": "✅ 公開完了", "failure": "❌ 公開失敗"},
+  "results": [
+    {"name": "準備", "items": [
+      {"label": "Checkout", "job": "build", "step": "Checkout"},
+      {"label": "公開", "job": "publish"}
+    ]}
+  ],
+  "errors": true,
+  "mentions": {"your-github-login": "123456789012345678", "*": "123456789012345678"}
+}</code></pre>
+  <div class="table-wrap"><table>
+    <tr><th>name</th><td>進捗メッセージの見出し（既定はリポジトリ名）</td></tr>
+    <tr><th>username</th><td>送信者名</td></tr>
+    <tr><th>titles</th><td>結果ごとの見出し</td></tr>
+    <tr><th>results</th><td>工程結果の段。<code>job</code> は job の表示名、<code>step</code> は step 名（省略で job の結果）。省略時は完了した job を並べる</td></tr>
+    <tr><th>errors</th><td>失敗時にログ抜粋を載せるか（既定 true）</td></tr>
+    <tr><th>mentions</th><td>失敗時に呼ぶ人。<code>*</code> は未登録時の宛先。無ければ誰も呼ばない</td></tr>
+    <tr><th>mention-message</th><td>メンションに続く文</td></tr>
+  </table></div>
+
+  <footer>
+    <a href="https://github.com/TsukumiStudio/MornBuildNotify">GitHub</a> ・ Public domain (Unlicense)
+  </footer>
+</main>
+</body>
+</html>
