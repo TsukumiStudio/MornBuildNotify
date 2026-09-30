@@ -59,7 +59,12 @@ class NotifyTest(unittest.TestCase):
         return calls
 
     def test_start_update_finish_reuse_one_message(self):
+        # Without the GitHub API the progress falls back to the plain text message.
         self.config.write_text(json.dumps({"name": "Game"}))
+        os.environ["RUNNER_TEMP"] = self.temp.name
+        unavailable = patch.object(notify, "gh", side_effect=OSError)
+        unavailable.start()
+        self.addCleanup(unavailable.stop)
         calls = self.send_all(["start"])
         os.environ["MORN_BUILD_NOTIFY_MESSAGE_ID"] = Path(os.environ["GITHUB_OUTPUT"]).read_text().strip().split("=")[1]
         with patch.object(notify, "build_payload", return_value={"embeds": [{"title": "完了"}]}):
@@ -73,6 +78,62 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual((update["embeds"], update["allowed_mentions"]), ([], {"parse": []}))
         self.assertEqual(json.loads(calls[2].data),
                          {"embeds": [{"title": "完了"}], "content": "", "allowed_mentions": {"parse": []}})
+
+    def progress_jobs(self):
+        return [{"id": 7, "name": "build", "status": "in_progress", "runner_name": "mac", "steps": [
+            {"name": "Checkout", "status": "completed", "conclusion": "success",
+             "started_at": "2026-10-01T00:00:00Z", "completed_at": "2026-10-01T00:00:05Z"},
+            {"name": "Export", "status": "in_progress", "started_at": "2026-10-01T00:00:05Z"},
+            {"name": "Upload", "status": "queued"}]}]
+
+    def test_progress_uses_final_layout_with_running_bar(self):
+        from datetime import datetime, timezone
+        config = {"results": [{"name": "工程", "items": [
+            {"label": "準備", "job": "build", "step": "Checkout"},
+            {"label": "書き出し", "job": "build", "step": "Export"},
+            {"label": "配置", "job": "build", "step": "Upload"}]}]}
+        now = datetime(2026, 10, 1, 0, 0, 20, tzinfo=timezone.utc)
+        payload = notify.progress_payload(config, self.progress_jobs(), {("build", "Export"): 30.0},
+                                          "書き出し中", "[修正] を入れる", now)
+        embed = payload["embeds"][0]
+        self.assertEqual(embed["title"], "🔄 ビルド中（1/3）: org/repo")
+        self.assertEqual(embed["description"], "書き出し中")
+        self.assertEqual([f["name"] for f in embed["fields"]], ["コミット", "工程", "ログ"])
+        self.assertIn("\\[修正\\]", embed["fields"][0]["value"])
+        lines = embed["fields"][1]["value"].split("\n")
+        self.assertEqual(lines[0], "✅ 準備：成功")
+        self.assertEqual(lines[1], "▶️ 書き出し：▰▰▰▰▰▰▱▱▱▱▱▱ 50%")
+        self.assertEqual(lines[2], "⬜ 配置：待機中")
+
+    def test_bar_caps_and_flows_without_estimate(self):
+        self.assertTrue(notify.bar(100, 10).endswith("95%"))
+        first, later = notify.bar(0, None), notify.bar(notify.TICK_SECONDS, None)
+        self.assertNotEqual(first.split()[0], later.split()[0])
+        self.assertEqual(first.count("▰"), 1)
+
+    def test_update_sends_progress_embed_and_keeps_phase(self):
+        os.environ["MORN_BUILD_NOTIFY_MESSAGE_ID"] = "123456789012345678"
+        os.environ["RUNNER_TEMP"] = self.temp.name
+        with patch.object(notify, "jobs", return_value=self.progress_jobs()), \
+                patch.object(notify, "estimates", return_value={}), \
+                patch.object(notify, "commit_info", return_value=("件名", "someone")):
+            calls = self.send_all(["update", "Web", "書き出し中"])
+        body = json.loads(calls[0].data)
+        self.assertEqual((calls[0].method, body["content"]), ("PATCH", ""))
+        self.assertEqual(body["embeds"][0]["description"], "Web 書き出し中")
+        self.assertEqual(notify.read_phase(), "Web 書き出し中")
+
+    def test_tick_stops_when_own_job_completes(self):
+        os.environ.update(MORN_BUILD_NOTIFY_MESSAGE_ID="123456789012345678", RUNNER_NAME="mac",
+                          RUNNER_TEMP=self.temp.name)
+        running, finished = self.progress_jobs(), self.progress_jobs()
+        finished[0]["status"] = "completed"
+        with patch.object(notify, "jobs", side_effect=[running, finished]), \
+                patch.object(notify, "estimates", return_value={}), \
+                patch.object(notify, "commit_info", return_value=("件名", "someone")), \
+                patch.object(notify.time, "sleep"):
+            calls = self.send_all(["tick"])
+        self.assertEqual([c.method for c in calls], ["PATCH"])
 
     def test_finish_without_message_posts_new_one(self):
         with patch.object(notify, "build_payload", return_value={"embeds": []}):

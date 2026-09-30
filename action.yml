@@ -73,6 +73,11 @@ runs:
               echo "MORN_BUILD_NOTIFY_SHA=$SHA"
               echo "MORN_BUILD_NOTIFY_CONFIG=$CONFIG"
             } >> "$GITHUB_ENV"
+            # この job の間、数秒ごとに実行中の工程のプログレスバーを進める。自分の job が終わるか、
+            # job の終わりに runner が残ったプロセスを片付けると止まる。
+            if [ -n "$MESSAGE_ID" ]; then
+              nohup python3 "$GITHUB_ACTION_PATH/morn_build_notify.py" tick </dev/null >/dev/null 2>&1 &
+            fi
             ;;
           start|finish)
             python3 "$GITHUB_ACTION_PATH/morn_build_notify.py" "$MODE"

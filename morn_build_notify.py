@@ -3,8 +3,12 @@
 
 使い方（action.yml が PATH と環境変数を整える）:
   morn-build-notify start           開始メッセージを送り、message_id を GITHUB_OUTPUT へ書く
-  morn-build-notify update <文言>   同じメッセージを進捗文言へ書き換える
+  morn-build-notify update <文言>   同じメッセージの進捗文言を書き換える
+  morn-build-notify tick            setup が裏で動かす。数秒ごとに工程の進み具合を書き換える
   morn-build-notify finish          結果・工程・失敗ログ・メンション付きの埋め込みへ置き換える
+
+途中経過も完成形と同じ埋め込み（コミット・工程・ログ）で出す。工程は済・実行中・待機で並び、
+実行中の工程には、前回成功した同じ workflow の所要時間から見積もったプログレスバーが付く。
 
 通知の失敗はビルドを止めない。警告だけ出して終了コード 0 で抜ける。
 """
@@ -13,6 +17,9 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -20,6 +27,10 @@ from urllib.request import Request, urlopen
 MESSAGE_ID = re.compile(r"[0-9]{17,20}\Z")
 USER_AGENT = "MornBuildNotify/1.0"
 COLORS = {"success": 5763719, "failure": 15548997, "cancelled": 9807270, "skipped": 9807270}
+RUNNING_COLOR = 16705372
+BAR = 12
+TICK_SECONDS = 5
+TICK_LIMIT = 3 * 60 * 60
 TITLES = {"success": "✅ ビルド成功", "failure": "❌ ビルド失敗",
           "cancelled": "⏹️ ビルド中止", "skipped": "⏭️ ビルドスキップ"}
 STATUS_LABELS = {
@@ -92,6 +103,10 @@ def progress_content(config, phase):
            f"/attempts/{os.environ['GITHUB_RUN_ATTEMPT']}")
     sha = (os.environ.get("MORN_BUILD_NOTIFY_SHA") or os.environ["GITHUB_SHA"])[:7]
     return f"{name} ビルド進捗\n{repo}@{sha}\n{phase[:1500]}\n{url}"
+
+
+def phase_path():
+    return Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()) / "morn-build-notify-phase.txt"
 
 
 # --- GitHub API -----------------------------------------------------------
@@ -321,6 +336,143 @@ def build_payload(config):
     return payload
 
 
+# --- 途中経過 -------------------------------------------------------------
+
+def parse_time(value):
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+    except ValueError:
+        return None
+
+
+def seconds(entry):
+    start, end = parse_time(entry.get("started_at")), parse_time(entry.get("completed_at"))
+    return (end - start).total_seconds() if start and end else None
+
+
+def estimates():
+    """前回成功した同じ workflow の run から、(job名, step名 or None) ごとの所要秒数。取れなければ空。"""
+    repo, run_id = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
+    try:
+        workflow = json.loads(gh(f"repos/{repo}/actions/runs/{run_id}"))["workflow_id"]
+        runs = json.loads(gh(f"repos/{repo}/actions/workflows/{workflow}/runs?status=success&per_page=5"))
+        previous = next(r["id"] for r in runs["workflow_runs"] if str(r["id"]) != run_id)
+        found = {}
+        for job in json.loads(gh(f"repos/{repo}/actions/runs/{previous}/jobs"))["jobs"]:
+            for key, entry in [(None, job), *((s.get("name"), s) for s in job.get("steps", []))]:
+                if (duration := seconds(entry)) is not None:
+                    found[(job.get("name"), key)] = duration
+        return found
+    except (KeyError, StopIteration, OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return {}
+
+
+def bar(elapsed, estimate):
+    """見積もりがあれば進み具合、無ければ経過に合わせて流れる光。"""
+    if estimate:
+        ratio = min(elapsed / estimate, 0.95)
+        filled = max(1, round(ratio * BAR))
+        return f"{'▰' * filled}{'▱' * (BAR - filled)} {int(ratio * 100)}%"
+    head = int(elapsed // TICK_SECONDS) % BAR
+    return "".join("▰" if i == head else "▱" for i in range(BAR)) + f" {int(elapsed)}秒"
+
+
+def progress_line(label, entry, estimate, now):
+    status = entry.get("status")
+    if status == "completed":
+        return status_line(label, entry.get("conclusion"))
+    if status == "in_progress":
+        started = parse_time(entry.get("started_at"))
+        elapsed = max(0.0, (now - started).total_seconds()) if started else 0.0
+        return f"▶️ {label}：{bar(elapsed, estimate)}"
+    return f"⬜ {label}：待機中"
+
+
+def progress_items(config, run_jobs):
+    """(表示名, 工程の状態, 見積もりの鍵) を段ごとに。設定が無ければ job ごと。"""
+    groups = config.get("results")
+    if not groups:
+        return [("処理", [(j.get("name", "?"), j, (j.get("name"), None)) for j in run_jobs])]
+    result = []
+    for group in groups:
+        items = []
+        for item in group["items"]:
+            job = next((j for j in run_jobs if j.get("name") == item["job"]), {})
+            step = item.get("step")
+            entry = job if step is None else next((s for s in job.get("steps", []) if s.get("name") == step), {})
+            items.append((item["label"], entry, (item["job"], step)))
+        result.append((group["name"], items))
+    return result
+
+
+def progress_payload(config, run_jobs, found, phase, commit, now=None):
+    now = now or datetime.now(timezone.utc)
+    repo = os.environ["GITHUB_REPOSITORY"]
+    groups = progress_items(config, run_jobs)
+    entries = [entry for _, items in groups for _, entry, _ in items]
+    done = sum(entry.get("status") == "completed" for entry in entries)
+    title = config.get("titles", {}).get("running", "🔄 ビルド中")
+    embed = {"title": f"{title}（{done}/{len(entries)}）: {repo}", "color": RUNNING_COLOR}
+    if phase:
+        embed["description"] = phase[:1500]
+    subject = commit.split("\n")[0][:350].replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    fields = [{"name": "コミット", "value": f"[{subject}](https://github.com/{repo}/commit/{sha()})"}]
+    for name, items in groups:
+        lines = [progress_line(label, entry, found.get(key), now) for label, entry, key in items]
+        if lines:
+            fields.append({"name": name, "value": "\n".join(lines)[:1024], "inline": False})
+    log = f"https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+    fields.append({"name": "ログ", "value": f"[GitHub Actionsを開く]({log})"})
+    embed["fields"] = fields[:25]
+    payload = {"content": "", "embeds": [embed], "allowed_mentions": {"parse": []}}
+    if config.get("username"):
+        payload["username"] = config["username"]
+    return payload
+
+
+def read_phase():
+    try:
+        return phase_path().read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def send_progress(config, found, commit, *, post_new=False):
+    """工程を取れなければ、従来の文字だけの進捗に戻す。"""
+    phase = read_phase()
+    try:
+        payload = progress_payload(config, jobs(), found, phase, commit)
+    except (KeyError, OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        payload = {"content": progress_content(config, phase or "ビルド中"), "embeds": [],
+                   "allowed_mentions": {"parse": []}}
+    if post_new:
+        post(payload)
+    else:
+        request("PATCH", payload, message_id=message_id())
+
+
+def own_job(run_jobs):
+    runner = os.environ.get("RUNNER_NAME")
+    return next((j.get("id") for j in run_jobs
+                 if j.get("status") == "in_progress" and runner and j.get("runner_name") == runner), None)
+
+
+def tick(config):
+    """自分の job が終わるまで、数秒ごとにプログレスバーを進める。"""
+    found, (commit, _) = estimates(), commit_info()
+    mine = None
+    deadline = time.monotonic() + TICK_LIMIT
+    while time.monotonic() < deadline:
+        run_jobs = jobs()
+        mine = mine or own_job(run_jobs)
+        job = next((j for j in run_jobs if j.get("id") == mine), None)
+        if mine and (not job or job.get("status") == "completed"):
+            return
+        request("PATCH", progress_payload(config, run_jobs, found, read_phase(), commit),
+                message_id=message_id())
+        time.sleep(TICK_SECONDS)
+
+
 # --- 入口 -----------------------------------------------------------------
 
 def main(args):
@@ -328,13 +480,17 @@ def main(args):
         command = args[0] if args else ""
         config = load_config()
         if command == "start" and len(args) == 1:
-            post({"content": progress_content(config, "ビルド開始"), "allowed_mentions": {"parse": []}})
+            phase_path().write_text("ビルド開始", encoding="utf-8")
+            send_progress(config, estimates(), commit_info()[0], post_new=True)
         elif command == "update" and len(args) >= 2:
             if not message_id():
                 warn("進捗通知のメッセージIDがありません")
                 return
-            request("PATCH", {"content": progress_content(config, " ".join(args[1:])), "embeds": [],
-                              "allowed_mentions": {"parse": []}}, message_id=message_id())
+            phase_path().write_text(" ".join(args[1:]), encoding="utf-8")
+            send_progress(config, estimates(), commit_info()[0])
+        elif command == "tick" and len(args) == 1:
+            if message_id():
+                tick(config)
         elif command == "finish" and len(args) == 1:
             payload = build_payload(config)
             payload.setdefault("content", "")
