@@ -1,0 +1,83 @@
+name: MornBuildNotify
+description: GitHub Actions の進捗と結果を、1つの Discord メッセージへ書き換えながら通知する
+branding:
+  icon: bell
+  color: purple
+
+inputs:
+  webhook:
+    description: Discord Webhook URL（Secret から渡す）。空なら何もしない
+    required: true
+  mode:
+    description: "setup: このjobで morn-build-notify を使えるようにする / start: 開始メッセージを送る / finish: 結果へ置き換える"
+    default: setup
+  message-id:
+    description: start の出力 message-id。setup と finish で渡すと同じメッセージを更新する
+    default: ""
+  status:
+    description: "finish の結果（success / failure / cancelled / skipped）。空なら needs から決める"
+    default: ""
+  needs:
+    description: "finish で status の既定値と API 障害時の表示に使う。toJSON(needs) の式を渡す"
+    default: ""
+  fields:
+    description: "finish で足す欄。1行1項目の `名前: 値`。値の \\n は改行、値が空の行は出さない"
+    default: ""
+  sha:
+    description: 通知に載せるコミット。空なら github.sha
+    default: ""
+  config:
+    description: 設定ファイル（JSON）のパス
+    default: .github/morn-build-notify.json
+  github-token:
+    description: 工程結果・失敗ログ・コミット作者の取得に使う（actions:read が要る）
+    default: ${{ github.token }}
+
+outputs:
+  message-id:
+    description: start で送ったメッセージのID
+    value: ${{ steps.run.outputs.message_id }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+        WEBHOOK: ${{ inputs.webhook }}
+        MESSAGE_ID: ${{ inputs.message-id }}
+        MORN_BUILD_NOTIFY_STATUS: ${{ inputs.status }}
+        MORN_BUILD_NOTIFY_NEEDS: ${{ inputs.needs }}
+        MORN_BUILD_NOTIFY_FIELDS: ${{ inputs.fields }}
+        MORN_BUILD_NOTIFY_COMMIT_TITLE: ${{ github.event.head_commit.message }}
+        SHA: ${{ inputs.sha }}
+        CONFIG: ${{ inputs.config }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        if [ -z "$WEBHOOK" ]; then
+          echo "::warning::MornBuildNotify: webhook が空のため通知しません"
+          exit 0
+        fi
+        case "$WEBHOOK$MESSAGE_ID$SHA$CONFIG" in *$'\n'*|*$'\r'*) echo "::error::MornBuildNotify: 入力に改行を含められません"; exit 1;; esac
+        export MORN_BUILD_NOTIFY_WEBHOOK="$WEBHOOK" MORN_BUILD_NOTIFY_MESSAGE_ID="$MESSAGE_ID"
+        export MORN_BUILD_NOTIFY_SHA="$SHA" MORN_BUILD_NOTIFY_CONFIG="$CONFIG"
+        case "$MODE" in
+          setup)
+            echo "$GITHUB_ACTION_PATH/bin" >> "$GITHUB_PATH"
+            {
+              echo "MORN_BUILD_NOTIFY_WEBHOOK=$WEBHOOK"
+              echo "MORN_BUILD_NOTIFY_MESSAGE_ID=$MESSAGE_ID"
+              echo "MORN_BUILD_NOTIFY_SHA=$SHA"
+              echo "MORN_BUILD_NOTIFY_CONFIG=$CONFIG"
+            } >> "$GITHUB_ENV"
+            ;;
+          start|finish)
+            python3 "$GITHUB_ACTION_PATH/morn_build_notify.py" "$MODE"
+            ;;
+          *)
+            echo "::error::MornBuildNotify: mode は setup / start / finish のいずれかです"
+            exit 1
+            ;;
+        esac
