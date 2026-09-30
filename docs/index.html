@@ -71,10 +71,10 @@
     <div class="f">コミット ／ 工程結果（✅ Checkout ❌ テスト ⏭️ 公開） ／ ログ ／ ビルドエラー詳細</div>
   </div>
 
-  <h2>導入（ウィザード）</h2>
-  <p>対象リポジトリのルートで1行実行する。質問に答えると、設定ファイルと workflow を書き出し、Webhook を Secret へ登録する。</p>
+  <h2>導入（テンプレート）</h2>
+  <p>対象リポジトリのルートで1行実行する。設定ファイルと workflow の雛形を書き出し、最後に Webhook URL だけ聞いて Secret へ登録する（Enter で飛ばせる）。</p>
   <pre><code>python3 &lt;(curl -fsSL https://raw.githubusercontent.com/TsukumiStudio/MornBuildNotify/v1/init.py)</code></pre>
-  <p>既存ファイルは上書きするか毎回聞く。書き出したものをコミットして push すれば通知が届く。</p>
+  <p>既存のファイルには触らない。workflow のビルドコマンドを書き換え、必要なら設定ファイルにメンション先を足して push すれば通知が届く。</p>
 
   <h2>既存の workflow へ足す</h2>
   <pre><code>permissions:

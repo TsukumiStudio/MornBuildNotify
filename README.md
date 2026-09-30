@@ -10,9 +10,9 @@ GitHub Actions の進捗と結果を、**1つの Discord メッセージを書�
 - 通知に失敗してもビルドは止めない。Webhook URL はログに出さない
 - 依存は `python3` と `gh`（GitHub-hosted runner には入っている）だけ
 
-## 導入（ウィザード）
+## 導入（テンプレート）
 
-対象リポジトリのルートで実行する。質問に答えると設定ファイル・workflow を書き出し、Webhook を Secret へ登録する。
+対象リポジトリのルートで実行する。設定ファイルと workflow の雛形を書き出し、最後に Webhook URL だけ聞いて Secret へ登録する（Enter で飛ばせる）。既存のファイルには触らない。書き出した後は自由に書き換える。
 
 ```bash
 python3 <(curl -fsSL https://raw.githubusercontent.com/TsukumiStudio/MornBuildNotify/v1/init.py)
