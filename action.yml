@@ -42,7 +42,8 @@ runs:
   using: composite
   steps:
     - id: run
-      shell: bash
+      # runner の置き場所に空白があっても動くよう、台本のパスを引用符で囲む（`shell: bash` は囲まない）。
+      shell: bash --noprofile --norc -eo pipefail "{0}"
       env:
         MODE: ${{ inputs.mode }}
         WEBHOOK: ${{ inputs.webhook }}
