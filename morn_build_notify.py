@@ -504,11 +504,16 @@ def main(args):
                 tick(config)
         elif command == "finish" and len(args) == 1:
             payload = build_payload(config)
-            payload.setdefault("content", "")
-            payload.setdefault("allowed_mentions", {"parse": []})
             if message_id():
-                request("PATCH", payload, message_id=message_id())
+                # 編集で足したメンションは Discord が通知しないので、メンションだけ別に投稿する。
+                ping = {key: payload.pop(key) for key in ("content", "allowed_mentions") if key in payload}
+                request("PATCH", {**payload, "content": "", "allowed_mentions": {"parse": []}},
+                        message_id=message_id())
+                if ping:
+                    request("POST", {**ping, **({"username": payload["username"]} if "username" in payload else {})})
             else:
+                payload.setdefault("content", "")
+                payload.setdefault("allowed_mentions", {"parse": []})
                 post(payload)
         elif command == "payload" and len(args) == 1:
             # 送信せずに組み立て結果だけを見る（確認・テスト用）。

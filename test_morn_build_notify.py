@@ -78,6 +78,16 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(json.loads(calls[1].data),
                          {"embeds": [{"title": "完了"}], "content": "", "allowed_mentions": {"parse": []}})
 
+    def test_finish_posts_mention_separately_when_editing(self):
+        os.environ["MORN_BUILD_NOTIFY_MESSAGE_ID"] = "123456789012345678"
+        mention = {"content": f"<@{USER}> 失敗", "allowed_mentions": {"parse": [], "users": [USER]}}
+        with patch.object(notify, "build_payload", return_value={"embeds": [{"title": "失敗"}], "username": "bot", **mention}):
+            calls = self.send_all(["finish"])
+        self.assertEqual([c.method for c in calls], ["PATCH", "POST"])
+        self.assertEqual(json.loads(calls[0].data),
+                         {"embeds": [{"title": "失敗"}], "username": "bot", "content": "", "allowed_mentions": {"parse": []}})
+        self.assertEqual(json.loads(calls[1].data), {**mention, "username": "bot"})
+
     def progress_jobs(self):
         return [{"id": 7, "name": "build", "status": "in_progress", "runner_name": "mac", "steps": [
             {"name": "Checkout", "status": "completed", "conclusion": "success",
