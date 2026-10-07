@@ -78,7 +78,7 @@ def request(method, payload, *, wait=False, message_id=None):
     parts = webhook_url()
     path = parts.path + (f"/messages/{message_id}" if message_id else "")
     query = "&".join(q for q in (parts.query, "wait=true" if wait else "") if q)
-    body = json.dumps(payload, ensure_ascii=False).encode()
+    body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
     req = Request(urlunsplit((parts.scheme, parts.netloc, path, query, "")), data=body, method=method,
                   headers={"Content-Type": "application/json", "User-Agent": USER_AGENT})
     for attempt in range(2):
@@ -96,6 +96,29 @@ def request(method, payload, *, wait=False, message_id=None):
 def message_id():
     value = os.environ.get("MORN_BUILD_NOTIFY_MESSAGE_ID", "")
     return value if MESSAGE_ID.fullmatch(value) else None
+
+
+def mention_file():
+    """失敗メンションのIDを、同じ run の次の試行へ渡す置き場（action が Actions の cache で運ぶ）。"""
+    value = os.environ.get("MORN_BUILD_NOTIFY_MENTION_FILE", "")
+    return Path(value) if value else None
+
+
+def retract_previous_mention():
+    """前の試行が送った失敗メンションを消す。再実行で成功したのに「失敗しました」が残らないように。"""
+    path = mention_file()
+    if path is None or not path.is_file():
+        return
+    previous = path.read_text(encoding="utf-8").strip()
+    path.unlink()
+    if not MESSAGE_ID.fullmatch(previous):
+        return
+    try:
+        request("DELETE", None, message_id=previous)
+    except HTTPError as error:
+        # 手で消された後なら 404。消せなくても結果の通知は止めない。
+        if error.code != 404:
+            warn(f"前回の失敗メンションを消せません: HTTP {error.code}")
 
 
 def post(payload):
@@ -504,13 +527,19 @@ def main(args):
                 tick(config)
         elif command == "finish" and len(args) == 1:
             payload = build_payload(config)
+            retract_previous_mention()
             if message_id():
                 # 編集で足したメンションは Discord が通知しないので、メンションだけ別に投稿する。
                 ping = {key: payload.pop(key) for key in ("content", "allowed_mentions") if key in payload}
                 request("PATCH", {**payload, "content": "", "allowed_mentions": {"parse": []}},
                         message_id=message_id())
                 if ping:
-                    request("POST", {**ping, **({"username": payload["username"]} if "username" in payload else {})})
+                    sent = request("POST", {**ping, **({"username": payload["username"]} if "username" in payload else {})},
+                                   wait=True).get("id", "")
+                    path = mention_file()
+                    if path is not None and isinstance(sent, str) and MESSAGE_ID.fullmatch(sent):
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(sent, encoding="utf-8")
             else:
                 payload.setdefault("content", "")
                 payload.setdefault("allowed_mentions", {"parse": []})

@@ -88,6 +88,26 @@ class NotifyTest(unittest.TestCase):
                          {"embeds": [{"title": "失敗"}], "username": "bot", "content": "", "allowed_mentions": {"parse": []}})
         self.assertEqual(json.loads(calls[1].data), {**mention, "username": "bot"})
 
+    def test_rerun_retracts_previous_failure_mention(self):
+        os.environ["MORN_BUILD_NOTIFY_MESSAGE_ID"] = "123456789012345678"
+        mention_path = Path(self.temp.name) / "cache" / "mention.txt"
+        os.environ["MORN_BUILD_NOTIFY_MENTION_FILE"] = str(mention_path)
+        self.addCleanup(os.environ.pop, "MORN_BUILD_NOTIFY_MENTION_FILE", None)
+        mention = {"content": f"<@{USER}> 失敗", "allowed_mentions": {"parse": [], "users": [USER]}}
+        # 失敗した試行: メンションを送り、そのIDを次の試行へ残す。
+        with patch.object(notify, "build_payload", return_value={"embeds": [{"title": "失敗"}], **mention}):
+            calls = self.send_all(["finish"])
+        self.assertEqual([c.method for c in calls], ["PATCH", "POST"])
+        self.assertIn("wait=true", calls[1].full_url)
+        self.assertEqual(mention_path.read_text(), "123456789012345678")
+        # 再実行で成功した試行: 前の失敗メンションを消し、新しいメンションは送らない。
+        with patch.object(notify, "build_payload", return_value={"embeds": [{"title": "成功"}]}):
+            calls = self.send_all(["finish"])
+        self.assertEqual([c.method for c in calls], ["DELETE", "PATCH"])
+        self.assertTrue(calls[0].full_url.endswith("/messages/123456789012345678"))
+        self.assertIsNone(calls[0].data)
+        self.assertFalse(mention_path.exists())
+
     def progress_jobs(self):
         return [{"id": 7, "name": "build", "status": "in_progress", "runner_name": "mac", "steps": [
             {"name": "Checkout", "status": "completed", "conclusion": "success",

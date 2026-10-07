@@ -41,6 +41,14 @@ outputs:
 runs:
   using: composite
   steps:
+    # 前の試行が送った失敗メンションのIDを受け取る（再実行で成功したら消すため）。
+    # job の outputs は試行をまたげないので、同じ run の cache で運ぶ。
+    - if: inputs.mode == 'finish' && inputs.webhook != ''
+      uses: actions/cache/restore@v4
+      with:
+        path: .morn-build-notify/mention.txt
+        key: morn-build-notify-mention-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: morn-build-notify-mention-${{ github.run_id }}-
     - id: run
       # runner の置き場所に空白があっても動くよう、台本のパスを引用符で囲む（`shell: bash` は囲まない）。
       shell: bash --noprofile --norc -eo pipefail "{0}"
@@ -55,6 +63,7 @@ runs:
         SHA: ${{ inputs.sha }}
         CONFIG: ${{ inputs.config }}
         GH_TOKEN: ${{ inputs.github-token }}
+        MORN_BUILD_NOTIFY_MENTION_FILE: ${{ github.workspace }}/.morn-build-notify/mention.txt
       run: |
         set -euo pipefail
         # webhook が空でも、後続 step の `morn-build-notify update` が失敗しないよう PATH だけは通す。
@@ -88,3 +97,9 @@ runs:
             exit 1
             ;;
         esac
+    # この試行で送った失敗メンションのIDを、次の試行へ残す。送っていなければ何もしない。
+    - if: inputs.mode == 'finish' && inputs.webhook != '' && hashFiles('.morn-build-notify/mention.txt') != ''
+      uses: actions/cache/save@v4
+      with:
+        path: .morn-build-notify/mention.txt
+        key: morn-build-notify-mention-${{ github.run_id }}-${{ github.run_attempt }}
