@@ -47,7 +47,8 @@ TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT[^ ]+Z\s*")
 ERROR = re.compile(r"fatal|error|script error|exception|traceback|missing|not found|failed", re.I)
 ACTIONABLE = re.compile(r"##\[error\]|fatal:|script error|exception|traceback", re.I)
 GENERIC_EXIT = re.compile(r"exit(?:ed|ing)?\s+(?:with\s+)?(?:code\s+)?[1-9]\d*\b", re.I)
-ANNOTATION = re.compile(r"##\[error\](.*)|::error(?:\s[^:]*)?::(.*)")
+# 行頭だけを見る。ログに残る step 本文の `echo "::error::…"` は拾わない。
+ANNOTATION = re.compile(r"(?:##\[error\]|::error(?:\s[^:]*)?::)(.*)")
 
 
 def warn(message):
@@ -263,10 +264,10 @@ def annotations(log):
     """`::error` で出したエラーを、ログの順に重複なく返す。終了コードだけの行は除く。"""
     found = []
     for raw in log.splitlines():
-        match = ANNOTATION.search(ANSI.sub("", raw))
+        match = ANNOTATION.match(TIMESTAMP.sub("", ANSI.sub("", raw)))
         if not match:
             continue
-        message = (match[1] if match[1] is not None else match[2]).strip()
+        message = match[1].strip()
         message = message.replace("%0D", "").replace("%0A", " ").replace("%25", "%")[:300]
         if message and not GENERIC_EXIT.search(message) and message not in found:
             found.append(message)
