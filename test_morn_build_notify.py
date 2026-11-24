@@ -216,7 +216,7 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(fields["Phase 1 ─ 検査"], "✅ 準備：成功\n❌ 保存：失敗\n⏭️ 公開：スキップ")
         self.assertEqual(fields["遊ぶ"], "[ここ](https://x)\n7日で消える")
         self.assertNotIn("空", fields)
-        self.assertEqual(fields["ビルドエラー詳細"], "[save/a] 失敗(exit=1); 保存値が違います")
+        self.assertEqual(fields["ビルドエラー詳細"], "- [save/a] 失敗(exit=1); 保存値が違います")
         self.assertEqual(payload["allowed_mentions"], {"parse": [], "users": [USER]})
         self.assertEqual(payload["username"], "bot")
         self.assertLessEqual(sum(len(f["name"]) + len(f["value"]) for f in embed["fields"]), 6000)

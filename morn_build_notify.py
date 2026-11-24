@@ -304,7 +304,7 @@ def error_details(run_jobs):
         log = gh(f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/jobs/{job['id']}/logs")
         found = annotations(log)
         if found:
-            details.extend(found)
+            details.extend(f"- {message}" for message in found)
         else:
             step = next((s.get("name") for s in job.get("steps", [])
                          if s.get("conclusion") in {"failure", "timed_out"}), "失敗ステップ")
