@@ -203,7 +203,8 @@ class NotifyTest(unittest.TestCase):
                         {"name": "Checkout", "conclusion": "success"},
                         {"name": "検査 / 保存", "conclusion": "failure"}]},
                     {"id": 2, "name": "publish", "status": "completed", "conclusion": "skipped"}]
-        log = ("2026-09-17T13:36:59Z ##[error][save/a] 失敗(exit=1); 保存値が違います\n"
+        log = ('2026-09-17T13:36:58Z     echo "::error::MornBuildNotify: mode は setup / start / finish のいずれかです"\n'
+               "2026-09-17T13:36:59Z ##[error][save/a] 失敗(exit=1); 保存値が違います\n"
                "##[error][save/a] 失敗(exit=1); 保存値が違います\n"
                "##[error]Process completed with exit code 1.\n")
         payload = self.payload("failure", run_jobs, log,
@@ -215,7 +216,7 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(fields["Phase 1 ─ 検査"], "✅ 準備：成功\n❌ 保存：失敗\n⏭️ 公開：スキップ")
         self.assertEqual(fields["遊ぶ"], "[ここ](https://x)\n7日で消える")
         self.assertNotIn("空", fields)
-        self.assertEqual(fields["ビルドエラー詳細"], "[save/a] 失敗(exit=1); 保存値が違います")
+        self.assertEqual(fields["ビルドエラー詳細"], "- [save/a] 失敗(exit=1); 保存値が違います")
         self.assertEqual(payload["allowed_mentions"], {"parse": [], "users": [USER]})
         self.assertEqual(payload["username"], "bot")
         self.assertLessEqual(sum(len(f["name"]) + len(f["value"]) for f in embed["fields"]), 6000)
