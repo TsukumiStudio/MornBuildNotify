@@ -116,6 +116,28 @@ jobs:
 | `mentions` | 失敗時に呼ぶ人。GitHub ログイン名 → Discord ユーザーID。`*` は未登録・取得失敗時の宛先。無ければ誰も呼ばない |
 | `mention-message` | メンションに続く文 |
 
+## Jenkins で使う
+
+`JENKINS_URL` があり `GITHUB_ACTIONS` が無いと Jenkins として動く。工程は API から取らず、パイプラインが知らせたものを使う。裏の tick は無く、`stage` と `update` のたびに送る。MornJenkins の共有ライブラリ `mornBuildNotify` がこの手順を包んでいる。
+
+```sh
+morn-build-notify start
+morn-build-notify stage 書き出し in_progress   # in_progress / success / failure / cancelled / skipped
+morn-build-notify update "書き出し中：Web"
+MORN_BUILD_NOTIFY_STATUS=failure morn-build-notify finish
+```
+
+| 環境変数 | 中身 |
+|---|---|
+| `MORN_BUILD_NOTIFY_WEBHOOK` / `MORN_BUILD_NOTIFY_CONFIG` | Actions と同じ |
+| `MORN_BUILD_NOTIFY_REPO` | `owner/repo` |
+| `MORN_BUILD_NOTIFY_DIR` | ビルド1本分の置き場。メッセージID・工程・`log.txt`（失敗時にパイプラインが書くログ）をここに置く |
+| `MORN_BUILD_NOTIFY_HISTORY` | 成功したビルドの工程ごとの所要秒数。次のバーの見積もりに使う。ビルドをまたいで残る場所にする |
+| `MORN_BUILD_NOTIFY_SHA` | 省略時は `GIT_COMMIT` |
+| `GH_TOKEN` | コミット作者の取得（メンションに使う）。無ければ件名を `git log` から取る |
+
+設定の `results` の `job` には Jenkins の工程名を書く（`step` は使わない）。ログのリンクは `BUILD_URL` の console。
+
 ## 送らずに確かめる
 
 ```bash

@@ -267,3 +267,56 @@ class NotifyTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JenkinsTest(unittest.TestCase):
+    """Jenkins では工程をパイプラインから受け取り、GitHub Actions の API を使わない。"""
+    send_all = NotifyTest.send_all
+
+    def setUp(self):
+        NotifyTest.setUp(self)
+        for key in ("GITHUB_OUTPUT", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_SHA",
+                    "GITHUB_ACTIONS", "RUNNER_TEMP"):
+            os.environ.pop(key, None)
+        os.environ.update({
+            "JENKINS_URL": "https://jenkins.example/", "BUILD_URL": "https://jenkins.example/job/build/7/",
+            "MORN_BUILD_NOTIFY_REPO": "org/repo", "GIT_COMMIT": "b" * 40,
+            "MORN_BUILD_NOTIFY_DIR": str(Path(self.temp.name) / "state"),
+            "MORN_BUILD_NOTIFY_HISTORY": str(Path(self.temp.name) / "history.json"),
+        })
+        self.config.write_text(json.dumps({"results": [{"name": "工程", "items": [
+            {"label": "書き出し", "job": "Export"}, {"label": "公開", "job": "Publish"}]}]}))
+        # gh はコミット情報だけに使う。取れなければ git log に戻る。
+        unavailable = patch.object(notify, "gh", side_effect=OSError)
+        unavailable.start()
+        self.addCleanup(unavailable.stop)
+
+    def test_stage_and_update_send_progress_without_tick(self):
+        calls = self.send_all(["start"], ["stage", "Export", "in_progress"], ["update", "Web"])
+        self.assertEqual([c.method for c in calls], ["POST", "PATCH", "PATCH"])
+        embed = json.loads(calls[2].data)["embeds"][0]
+        self.assertEqual(embed["description"], "Web")
+        self.assertIn("▶️ 書き出し", embed["fields"][1]["value"])
+        self.assertIn("⬜ 公開：待機中", embed["fields"][1]["value"])
+        self.assertIn("(https://jenkins.example/job/build/7/console)", embed["fields"][-1]["value"])
+        self.assertIn("/commit/" + "b" * 40, embed["fields"][0]["value"])
+
+    def test_failure_reads_log_and_success_keeps_history(self):
+        self.send_all(["start"], ["stage", "Export", "in_progress"], ["stage", "Export", "failure"])
+        (Path(os.environ["MORN_BUILD_NOTIFY_DIR"]) / "log.txt").write_text("+ make\n::error::書き出しに失敗\n")
+        os.environ["MORN_BUILD_NOTIFY_STATUS"] = "failure"
+        calls = self.send_all(["finish"])
+        fields = {f["name"]: f["value"] for f in json.loads(calls[0].data)["embeds"][0]["fields"]}
+        self.assertEqual(fields["ビルドエラー詳細"], "- 書き出しに失敗")
+        self.assertEqual(fields["工程"], "❌ 書き出し：失敗\n⏭️ 公開：スキップ")
+        self.assertFalse(Path(os.environ["MORN_BUILD_NOTIFY_HISTORY"]).exists())
+        os.environ["MORN_BUILD_NOTIFY_STATUS"] = "success"
+        self.send_all(["stage", "Export", "success"], ["finish"])
+        self.assertEqual(list(json.loads(Path(os.environ["MORN_BUILD_NOTIFY_HISTORY"]).read_text())), ["Export"])
+        self.assertIn(("Export", None), notify.estimates())
+
+    def test_stage_is_ignored_on_actions(self):
+        os.environ["GITHUB_ACTIONS"] = "true"
+        with patch.object(notify, "warn") as warned:
+            self.assertEqual(self.send_all(["stage", "Export", "in_progress"]), [])
+        warned.assert_called_once()
