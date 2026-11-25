@@ -11,6 +11,10 @@
 実行中の工程には、前回成功した同じ workflow の所要時間から見積もったプログレスバーが付く。
 
 通知の失敗はビルドを止めない。警告だけ出して終了コード 0 で抜ける。
+
+Jenkins（JENKINS_URL があり GITHUB_ACTIONS が無い）では、工程を API から取らず、パイプラインが
+`morn-build-notify stage <工程> <状態>` で知らせたものを MORN_BUILD_NOTIFY_DIR に溜めて使う。
+裏の tick は動かさず、stage と update のたびに送る。README の「Jenkins で使う」を参照。
 """
 import json
 import os
@@ -55,6 +59,31 @@ def warn(message):
     print(f"::warning::{message}", file=sys.stderr)
 
 
+def on_jenkins():
+    return bool(os.environ.get("JENKINS_URL")) and not os.environ.get("GITHUB_ACTIONS")
+
+
+def repo():
+    return os.environ["MORN_BUILD_NOTIFY_REPO" if on_jenkins() else "GITHUB_REPOSITORY"]
+
+
+def run_url():
+    if on_jenkins():
+        return os.environ["BUILD_URL"]
+    return f"https://github.com/{repo()}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+
+
+def log_link():
+    return f"[Jenkinsを開く]({run_url()}console)" if on_jenkins() else f"[GitHub Actionsを開く]({run_url()})"
+
+
+def state_dir():
+    """Jenkins の1ビルド分の置き場（工程・メッセージID・ログ）。"""
+    path = Path(os.environ["MORN_BUILD_NOTIFY_DIR"])
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def load_config():
     path = Path(os.environ.get("MORN_BUILD_NOTIFY_CONFIG") or ".github/morn-build-notify.json")
     if not path.is_file():
@@ -96,6 +125,8 @@ def request(method, payload, *, wait=False, message_id=None):
 
 def message_id():
     value = os.environ.get("MORN_BUILD_NOTIFY_MESSAGE_ID", "")
+    if not value and on_jenkins() and (state_dir() / "message_id").is_file():
+        value = (state_dir() / "message_id").read_text(encoding="utf-8").strip()
     return value if MESSAGE_ID.fullmatch(value) else None
 
 
@@ -129,19 +160,19 @@ def post(payload):
     if output := os.environ.get("GITHUB_OUTPUT"):
         with open(output, "a", encoding="utf-8") as file:
             file.write(f"message_id={sent}\n")
+    if on_jenkins():
+        (state_dir() / "message_id").write_text(sent, encoding="utf-8")
 
 
 def progress_content(config, phase):
-    repo = os.environ["GITHUB_REPOSITORY"]
-    name = config.get("name") or repo.split("/")[-1]
-    url = (f"https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-           f"/attempts/{os.environ['GITHUB_RUN_ATTEMPT']}")
-    sha = (os.environ.get("MORN_BUILD_NOTIFY_SHA") or os.environ["GITHUB_SHA"])[:7]
-    return f"{name} ビルド進捗\n{repo}@{sha}\n{phase[:1500]}\n{url}"
+    name = config.get("name") or repo().split("/")[-1]
+    url = run_url() if on_jenkins() else f"{run_url()}/attempts/{os.environ['GITHUB_RUN_ATTEMPT']}"
+    return f"{name} ビルド進捗\n{repo()}@{sha()[:7]}\n{phase[:1500]}\n{url}"
 
 
 def phase_path():
-    return Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir()) / "morn-build-notify-phase.txt"
+    base = state_dir() if on_jenkins() else Path(os.environ.get("RUNNER_TEMP") or tempfile.gettempdir())
+    return base / "morn-build-notify-phase.txt"
 
 
 # --- GitHub API -----------------------------------------------------------
@@ -151,27 +182,59 @@ def gh(*args):
                           text=True, timeout=20, check=True).stdout
 
 
+def jenkins_stages():
+    path = state_dir() / "stages.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+
+
+def mark_stage(name, status):
+    """Jenkins の工程を Actions の job と同じ形（name・status・conclusion・時刻）で残す。"""
+    now = datetime.now(timezone.utc).isoformat()
+    stages = [s for s in jenkins_stages() if s["name"] != name]
+    previous = next((s for s in jenkins_stages() if s["name"] == name), {})
+    entry = {"name": name, "steps": [], "started_at": previous.get("started_at") or now}
+    if status == "in_progress":
+        entry.update(status="in_progress", started_at=now)
+    else:
+        entry.update(status="completed", conclusion=status, completed_at=now)
+    (state_dir() / "stages.json").write_text(json.dumps([*stages, entry], ensure_ascii=False), encoding="utf-8")
+
+
+def save_history(run_jobs):
+    """成功したビルドの工程ごとの所要秒数を、次のビルドの見積もりに残す。"""
+    if path := os.environ.get("MORN_BUILD_NOTIFY_HISTORY"):
+        found = {job["name"]: duration for job in run_jobs if (duration := seconds(job)) is not None}
+        Path(path).write_text(json.dumps(found, ensure_ascii=False), encoding="utf-8")
+
+
 def jobs():
+    if on_jenkins():
+        return jenkins_stages()
     endpoint = (f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
                 f"/attempts/{os.environ['GITHUB_RUN_ATTEMPT']}/jobs")
     return [job for page in json.loads(gh("--paginate", "--slurp", endpoint)) for job in page["jobs"]]
 
 
 def sha():
+    if on_jenkins():
+        return os.environ.get("MORN_BUILD_NOTIFY_SHA") or os.environ["GIT_COMMIT"]
     return os.environ.get("MORN_BUILD_NOTIFY_SHA") or os.environ["GITHUB_SHA"]
 
 
 def commit_info():
     """コミット件名と作者の GitHub ログイン名。取れない部分は空。"""
     # push イベントの件名は github.sha のもの。別のコミットを載せるときは API から取る。
-    title = os.environ.get("MORN_BUILD_NOTIFY_COMMIT_TITLE", "") if sha() == os.environ["GITHUB_SHA"] else ""
+    title = os.environ.get("MORN_BUILD_NOTIFY_COMMIT_TITLE", "") if sha() == os.environ.get("GITHUB_SHA") else ""
     author = ""
     try:
-        commit = json.loads(gh(f"repos/{os.environ['GITHUB_REPOSITORY']}/commits/{sha()}"))
+        commit = json.loads(gh(f"repos/{repo()}/commits/{sha()}"))
         title = title or commit["commit"]["message"]
         author = (commit.get("author") or {}).get("login") or ""
     except (KeyError, TypeError, OSError, subprocess.SubprocessError, json.JSONDecodeError):
         warn("コミット情報を取得できませんでした")
+    if not title and on_jenkins():
+        title = subprocess.run(["git", "log", "-1", "--format=%B", sha()], capture_output=True, text=True,
+                               timeout=20).stdout.strip()
     return title or "コミット名を取得できませんでした", author
 
 
@@ -274,34 +337,40 @@ def annotations(log):
     return found
 
 
+def log_name():
+    return "Jenkins" if on_jenkins() else "Actions"
+
+
 def bounded(details, limit):
     if details and limit and len(details[0]) > limit:
         return details[0][:limit - 1] + "…"
     lines = []
     for detail in details:
         omitted = len(details) - len(lines) - 1
-        suffix = f"\nほか{omitted}件はActionsログ参照" if omitted else ""
+        suffix = f"\nほか{omitted}件は{log_name()}ログ参照" if omitted else ""
         if len("\n".join([*lines, detail]) + suffix) > limit:
             break
         lines.append(detail)
     omitted = len(details) - len(lines)
     if omitted:
-        suffix = f"ほか{omitted}件はActionsログ参照"
+        suffix = f"ほか{omitted}件は{log_name()}ログ参照"
         while lines and len("\n".join([*lines, suffix])) > limit:
             lines.pop()
             omitted += 1
-            suffix = f"ほか{omitted}件はActionsログ参照"
+            suffix = f"ほか{omitted}件は{log_name()}ログ参照"
         if len("\n".join([*lines, suffix])) <= limit:
             lines.append(suffix)
     return "\n".join(lines)
 
 
 def error_details(run_jobs):
+    if on_jenkins():
+        return jenkins_error_details(run_jobs)
     details = []
     for job in run_jobs:
         if job.get("conclusion") not in {"failure", "timed_out"}:
             continue
-        log = gh(f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/jobs/{job['id']}/logs")
+        log = gh(f"repos/{repo()}/actions/jobs/{job['id']}/logs")
         found = annotations(log)
         if found:
             details.extend(f"- {message}" for message in found)
@@ -310,6 +379,16 @@ def error_details(run_jobs):
                          if s.get("conclusion") in {"failure", "timed_out"}), "失敗ステップ")
             details.append(f"{job.get('name', '失敗ジョブ')} / {step}:\n{excerpt(log)}")
     return details
+
+
+def jenkins_error_details(run_jobs):
+    """Jenkins のログはビルド1本分（パイプラインが MORN_BUILD_NOTIFY_DIR/log.txt に書く）。"""
+    failed = [job["name"] for job in run_jobs if job.get("conclusion") in {"failure", "timed_out"}]
+    path = state_dir() / "log.txt"
+    log = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
+    if found := annotations(log):
+        return [f"- {message}" for message in found]
+    return [f"{failed[0] if failed else '失敗工程'}:\n{excerpt(log)}"] if log else []
 
 
 def mention(config, author):
@@ -327,11 +406,10 @@ def build_payload(config):
     if status not in COLORS:
         warn(f"status は {'/'.join(COLORS)} のいずれかにしてください: {status}")
         status = "failure"
-    repo = os.environ["GITHUB_REPOSITORY"]
     title, author = commit_info()
     subject = title.split("\n")[0][:350].replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-    embed = {"title": f"{({**TITLES, **config.get('titles', {})})[status]}: {repo}", "color": COLORS[status]}
-    fields = [{"name": "コミット", "value": f"[{subject}](https://github.com/{repo}/commit/{sha()})"}]
+    embed = {"title": f"{({**TITLES, **config.get('titles', {})})[status]}: {repo()}", "color": COLORS[status]}
+    fields = [{"name": "コミット", "value": f"[{subject}](https://github.com/{repo()}/commit/{sha()})"}]
     try:
         run_jobs = jobs()
     except (KeyError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
@@ -346,8 +424,7 @@ def build_payload(config):
             if len(fields) >= 20 or len(field["value"]) > room(embed, fields, field["name"]):
                 break
             fields.append(field)
-    log = f"https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-    fields.append({"name": "ログ", "value": f"[GitHub Actionsを開く]({log})"})
+    fields.append({"name": "ログ", "value": log_link()})
     for field in extra_fields(os.environ.get("MORN_BUILD_NOTIFY_FIELDS", "")):
         if len(fields) < 24 and len(field["value"]) <= room(embed, fields, field["name"]):
             fields.append(field)
@@ -387,6 +464,12 @@ def seconds(entry):
 
 def estimates():
     """前回成功した同じ workflow の run から、(job名, step名 or None) ごとの所要秒数。取れなければ空。"""
+    if on_jenkins():
+        try:
+            return {(name, None): value for name, value in
+                    json.loads(Path(os.environ["MORN_BUILD_NOTIFY_HISTORY"]).read_text(encoding="utf-8")).items()}
+        except (KeyError, OSError, ValueError, AttributeError):
+            return {}
     repo, run_id = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
     try:
         workflow = json.loads(gh(f"repos/{repo}/actions/runs/{run_id}"))["workflow_id"]
@@ -442,22 +525,20 @@ def progress_items(config, run_jobs):
 
 def progress_payload(config, run_jobs, found, phase, commit, now=None):
     now = now or datetime.now(timezone.utc)
-    repo = os.environ["GITHUB_REPOSITORY"]
     groups = progress_items(config, run_jobs)
     entries = [entry for _, items in groups for _, entry, _ in items]
     done = sum(entry.get("status") == "completed" for entry in entries)
     title = config.get("titles", {}).get("running", "🔄 ビルド中")
-    embed = {"title": f"{title}（{done}/{len(entries)}）: {repo}", "color": RUNNING_COLOR}
+    embed = {"title": f"{title}（{done}/{len(entries)}）: {repo()}", "color": RUNNING_COLOR}
     if phase:
         embed["description"] = phase[:1500]
     subject = commit.split("\n")[0][:350].replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-    fields = [{"name": "コミット", "value": f"[{subject}](https://github.com/{repo}/commit/{sha()})"}]
+    fields = [{"name": "コミット", "value": f"[{subject}](https://github.com/{repo()}/commit/{sha()})"}]
     for name, items in groups:
         lines = [progress_line(label, entry, found.get(key), now) for label, entry, key in items]
         if lines:
             fields.append({"name": name, "value": "\n".join(lines)[:1024], "inline": False})
-    log = f"https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-    fields.append({"name": "ログ", "value": f"[GitHub Actionsを開く]({log})"})
+    fields.append({"name": "ログ", "value": log_link()})
     embed["fields"] = fields[:25]
     payload = {"content": "", "embeds": [embed], "allowed_mentions": {"parse": []}}
     if config.get("username"):
@@ -512,22 +593,42 @@ def tick(config):
 
 # --- 入口 -----------------------------------------------------------------
 
+STAGE_STATES = ("in_progress", "success", "failure", "cancelled", "skipped")
+
+
+def jenkins_commit_title():
+    """stage・update のたびに API を引かないよう、コミット件名は start のときの分を使い回す。"""
+    path = state_dir() / "commit.txt"
+    if not path.is_file():
+        path.write_text(commit_info()[0], encoding="utf-8")
+    return path.read_text(encoding="utf-8")
+
+
 def main(args):
     try:
         command = args[0] if args else ""
         config = load_config()
         if command == "start" and len(args) == 1:
             phase_path().write_text("ビルド開始", encoding="utf-8")
-            send_progress(config, estimates(), commit_info()[0], post_new=True)
+            commit = jenkins_commit_title() if on_jenkins() else commit_info()[0]
+            send_progress(config, estimates(), commit, post_new=True)
         elif command == "update" and len(args) >= 2:
             # 送るのは setup が裏で動かす tick。ここで送ると回数制限に近づき、
-            # 各 step には GitHub API のトークンも無い。
+            # 各 step には GitHub API のトークンも無い。Jenkins には tick が無いのでここで送る。
             phase_path().write_text(" ".join(args[1:]), encoding="utf-8")
+            if on_jenkins() and message_id():
+                send_progress(config, estimates(), jenkins_commit_title())
+        elif command == "stage" and len(args) == 3 and on_jenkins() and args[2] in STAGE_STATES:
+            mark_stage(args[1], args[2])
+            if message_id():
+                send_progress(config, estimates(), jenkins_commit_title())
         elif command == "tick" and len(args) == 1:
             if message_id():
                 tick(config)
         elif command == "finish" and len(args) == 1:
             payload = build_payload(config)
+            if on_jenkins() and os.environ.get("MORN_BUILD_NOTIFY_STATUS") == "success":
+                save_history(jenkins_stages())
             retract_previous_mention()
             if message_id():
                 # 編集で足したメンションは Discord が通知しないので、メンションだけ別に投稿する。
@@ -549,7 +650,7 @@ def main(args):
             # 送信せずに組み立て結果だけを見る（確認・テスト用）。
             print(json.dumps(build_payload(config), ensure_ascii=False, indent=2))
         else:
-            warn("引数は start / update <文言> / finish / payload のいずれかです")
+            warn("引数は start / update <文言> / stage <工程> <状態>（Jenkins） / finish / payload のいずれかです")
     except Exception:
         # urllib や JSON の例外には Webhook URL や応答本文が含まれうるので出さない。
         warn("Discord通知に失敗しました（処理は継続します）")
