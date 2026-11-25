@@ -130,6 +130,7 @@ MORN_BUILD_NOTIFY_STATUS=failure morn-build-notify finish
 | 環境変数 | 中身 |
 |---|---|
 | `MORN_BUILD_NOTIFY_WEBHOOK` / `MORN_BUILD_NOTIFY_CONFIG` | Actions と同じ |
+| `MORN_BUILD_NOTIFY_RELAY` / `MORN_BUILD_NOTIFY_RELAY_TOKEN` | webhook の代わりに送る同じ機械の受付（`http://127.0.0.1:<port>/channels/<名前>`、MornDiscordBot の `relay.py`）と合言葉。bot として投稿する |
 | `MORN_BUILD_NOTIFY_REPO` | `owner/repo` |
 | `MORN_BUILD_NOTIFY_DIR` | ビルド1本分の置き場。メッセージID・工程・`log.txt`（失敗時にパイプラインが書くログ）をここに置く |
 | `MORN_BUILD_NOTIFY_HISTORY` | 成功したビルドの工程ごとの所要秒数。次のバーの見積もりに使う。ビルドをまたいで残る場所にする |

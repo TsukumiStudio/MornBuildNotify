@@ -320,3 +320,28 @@ class JenkinsTest(unittest.TestCase):
         with patch.object(notify, "warn") as warned:
             self.assertEqual(self.send_all(["stage", "Export", "in_progress"]), [])
         warned.assert_called_once()
+
+
+class RelayTest(unittest.TestCase):
+    """MORN_BUILD_NOTIFY_RELAY があれば webhook の代わりに同じ機械の受付へ送る。"""
+    send_all = NotifyTest.send_all
+
+    def setUp(self):
+        JenkinsTest.setUp(self)
+        os.environ.pop("MORN_BUILD_NOTIFY_WEBHOOK")
+        os.environ.update({"MORN_BUILD_NOTIFY_RELAY": "http://127.0.0.1:8791/channels/build",
+                           "MORN_BUILD_NOTIFY_RELAY_TOKEN": "t"})
+        self.addCleanup(os.environ.pop, "MORN_BUILD_NOTIFY_RELAY", None)
+        self.addCleanup(os.environ.pop, "MORN_BUILD_NOTIFY_RELAY_TOKEN", None)
+
+    def test_posts_and_edits_through_relay(self):
+        calls = self.send_all(["start"], ["stage", "Export", "in_progress"])
+        self.assertEqual([(c.method, c.full_url) for c in calls], [
+            ("POST", "http://127.0.0.1:8791/channels/build/messages"),
+            ("PATCH", "http://127.0.0.1:8791/channels/build/messages/123456789012345678")])
+        self.assertEqual(calls[0].get_header("Authorization"), "Bearer t")
+
+    def test_relay_must_be_local(self):
+        os.environ["MORN_BUILD_NOTIFY_RELAY"] = "https://example.com/channels/build"
+        with patch.object(notify, "warn"):
+            self.assertEqual(self.send_all(["start"]), [])

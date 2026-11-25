@@ -104,13 +104,27 @@ def webhook_url():
     return parts
 
 
+def relay_url():
+    """MORN_BUILD_NOTIFY_RELAY（同じ機械の受付。MornDiscordBot の relay.py）。webhook と同じ形で受け、bot として投稿する。"""
+    value = os.environ.get("MORN_BUILD_NOTIFY_RELAY", "")
+    if not value:
+        return None
+    parts = urlsplit(value)
+    if parts.scheme != "http" or parts.hostname not in {"127.0.0.1", "localhost"}:
+        raise ValueError
+    return parts
+
+
 def request(method, payload, *, wait=False, message_id=None):
-    parts = webhook_url()
-    path = parts.path + (f"/messages/{message_id}" if message_id else "")
-    query = "&".join(q for q in (parts.query, "wait=true" if wait else "") if q)
+    relay = relay_url()
+    parts = relay or webhook_url()
+    path = parts.path + ("/messages" if relay and method == "POST" else "") + (f"/messages/{message_id}" if message_id else "")
+    query = "&".join(q for q in (parts.query, "wait=true" if wait and not relay else "") if q)
     body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
-    req = Request(urlunsplit((parts.scheme, parts.netloc, path, query, "")), data=body, method=method,
-                  headers={"Content-Type": "application/json", "User-Agent": USER_AGENT})
+    headers = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
+    if relay:
+        headers["Authorization"] = "Bearer " + os.environ.get("MORN_BUILD_NOTIFY_RELAY_TOKEN", "")
+    req = Request(urlunsplit((parts.scheme, parts.netloc, path, query, "")), data=body, method=method, headers=headers)
     for attempt in range(2):
         try:
             with urlopen(req, timeout=10) as response:
